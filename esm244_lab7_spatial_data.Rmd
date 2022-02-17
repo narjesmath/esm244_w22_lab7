@@ -1,0 +1,40 @@
+---
+title: "Lab 7 Spatial data"
+author: "Narjes Mathlouthi"
+date: "2/17/2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(tidyverse)
+library(here)
+
+#simple feature package/vector data
+library(sf)
+#tmap interactive map
+library(tmap)
+```
+
+## Part 1: Spatial data wrangling, visualization
+
+##A. California county outlines(polygons)
+
+```{r}
+ca_counties_sf <- read_sf(here("data/ca_counties/CA_Counties_TIGER2016.shp"))
+
+#clean subset
+
+ca_subset_sf <- ca_counties_sf %>% 
+  
+  janitor::clean_names() %>% 
+  select(county_name = name, land_area = aland)
+```
+
+
+
+```{r}
+
+```
+
