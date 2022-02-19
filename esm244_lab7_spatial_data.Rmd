@@ -30,11 +30,189 @@ ca_subset_sf <- ca_counties_sf %>%
   
   janitor::clean_names() %>% 
   select(county_name = name, land_area = aland)
+
+# make a data frame
+
+ca_counties_df <- ca_counties_sf %>% 
+  as.data.frame() %>% 
+  select(-geometry)
+  
+```
+
+### Examine and set CRS
+
+CRS : coordinate reference system
+we nee
+
+```{r}
+ca_subset_sf %>%  st_crs()
+
+ca_subset_sf %>%  raster :: crs()
+
+```
+
+
+```{r}
+ggplot(data = ca_subset_sf)+
+  #geom recognizes where to get the spatial info, the geometruy column defines all the characteritics of the map below
+  geom_sf(aes(fill = land_area), color = "white", size = 0.1)+
+  theme_void() +
+  scale_fill_gradientn(colors = c('cyan', 'blue', 'purple'))
+```
+```{r}
+sesbania_sf <- read_sf(here("data/red_sesbania", "ds80.shp")) %>% 
+  janitor::clean_names()
+  
+  
+  sesbania_sf %>%  st_crs()
+  sesbania_sf %>%  raster::crs()
+  
+  ### if you know the ESPG
+  sesbania_3857_sf<- st_transform(sesbania_sf,3857)
+  
+  #if you dont know ESPG 
+  sesbania_3857_2 <- st_transform(sesbania_sf, st_crs(ca_subset_sf))
+  
+  #check new one
+  sesbania_3857_sf %>%  st_crs()
+```
+
+### Plot them together 
+
+```{r}
+ca_sesb_sf <-  ca_subset_sf %>% 
+  st_join(sesbania_3857_sf)
+
+head(ca_sesb_sf)
+
+
+sesb_counts_counts_sf <- ca_sesb_sf %>% 
+  group_by(county_name) %>% 
+  summarize(n_records = sum (!is.na(id)))
+
+head(sesb_counts_counts_sf)
+  
+```
+```{r}
+ggplot(data = sesb_counts_counts_sf) + 
+  geom_sf(aes(fill = n_records), color = "white", size = 0.1) +
+  scale_color_gradientn(colors= c('lightgrey','orange','red')) +
+  theme_minimal() +
+  labs(fill = "Number of S. punicea records")
+
+```
+
+```{r}
+
+solano_sesb_sf <- sesbania_3857_sf %>% 
+  filter(county == "Solano")
+
+solano_sf <- ca_subset_sf %>% 
+  filter(county_name == "Solano")
+
+ggplot()+
+  geom_sf(data = solano_sf) +
+  geom_sf(data = solano_sesb_sf, color = "red")
+  
 ```
 
 
 
 ```{r}
-
+# Make a map and fill the polygon 
+tmap_mode(mode = "view")
+tm_shape (ca_subset_sf) +
+  tm_fill("land_area",palette ="BuGn") +
+  tm_borders(col = "black") +
+  tm_shape(sesbania_3857_sf) +
+  
+  tm_dots()
 ```
 
+### check out all the palettes:
+# tmaptools::palette_explorer() ### need package shinyjs
+
+
+Let's just look at depth to groundwater (ft) in and around San Joaquin County. 
+
+```{r}
+# Just get sj_county
+sj_county_sf <- ca_counties_sf %>% 
+  filter(name == "San Joaquin")
+# Now keep observations for groundwater depth within that county:
+sj_depth_sf <- ca_dgw_sf %>% 
+  st_intersection(sj_county_sf)
+# Make a quick plot of those: 
+ggplot() +
+  geom_sf(data = sj_county_sf) +
+  geom_sf(data = sj_depth_sf, aes(color = dgbs)) +
+  theme_void() +
+  scale_color_viridis_c()
+```
+
+### Check for duplicate locations:
+
+Interpolation chokes when observations at identical location - spatial singularity!
+
+```{r}
+well_duplicates <- sj_depth_sf %>% 
+  janitor::get_dupes(latitude, longitude)
+well_duplicates
+# This will cause problems (0 spatial variance). We're just going to get rid of these problematic wells recorded at the same location: 
+sj_depth_sf <- sj_depth_sf %>% 
+  filter(!local_well %in% well_duplicates$local_well)
+# Check again for duplicates: 
+sj_depth_sf %>% 
+  janitor::get_dupes(latitude, longitude) 
+# No more duplicates
+```
+
+## Make a variogram: 
+
+```{r}
+# Create the variogram
+sj_dgw_vgm <- gstat::variogram(dgbs ~ 1, data = sj_depth_sf)
+# Plot it
+plot(sj_dgw_vgm) # Looks variogramish! Increasing variance as observations get further apart. Let's model this...
+# Now create the variogram model, & see ?vgm for other model options: 
+sj_dgw_vgm_fit <- fit.variogram(sj_dgw_vgm, 
+                                model = vgm(model = "Gau")) ### default starting
+sj_dgw_vgm_fit <- fit.variogram(sj_dgw_vgm, 
+                                model = vgm(model = "Gau", ### (leave with defaults first)
+                                            nugget = 20, sill = 3000, range = 30000))
+# Plot them together:
+plot(sj_dgw_vgm, sj_dgw_vgm_fit) 
+# You can check the sum of squares of residuals for each: 
+attr(sj_dgw_vgm_fit, 'SSErr') # ...and you could compare to other models...
+```
+
+## Spatial kriging
+
+```{r}
+# Make a grid over which we'll krige: 
+sj_grid <- st_bbox(sj_county_sf) %>%
+  st_as_stars(dx = 1000, dy = 1000) %>%
+  st_set_crs(st_crs(sj_county_sf)) %>%
+  st_crop(sj_county_sf)
+sj_grid
+# Look at the grid we made: 
+plot(sj_grid)
+# Perform ordinary kriging: 
+sj_dgw_krige <- krige(dgbs ~ 1, sj_depth_sf, sj_grid, model = sj_dgw_vgm_fit)
+# Initial plot of kriging outcome: 
+plot(sj_dgw_krige)
+# Convert it to a spatial data frame
+krige_df <- as.data.frame(sj_dgw_krige) %>% 
+  st_as_sf(coords = c("x","y")) %>% 
+  drop_na(var1.pred)
+st_crs(krige_df) <- 3857
+# Then we can use ggplot: 
+ggplot(data = krige_df) +
+  geom_sf(aes(color = var1.pred)) +
+  scale_color_gradient(low = "blue", high = "yellow")
+  
+```
+
+...& there are ways to convert this to raster data / aggregate if you want...
+
+## End variogram & kriging demo
